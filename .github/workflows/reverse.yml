@@ -1,0 +1,76 @@
+name: Decode Video from Text & Commit
+
+on:
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: write
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    if: "! contains(github.event.head_commit.message, '[skip-ci]')"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Check video.txt size
+        id: check
+        run: |
+          if [ ! -f video.txt ]; then
+            echo "exists=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "exists=true" >> $GITHUB_OUTPUT
+          TEXT_SIZE=$(wc -c < video.txt)
+          echo "video.txt size: $TEXT_SIZE bytes"
+          echo "text_size=$TEXT_SIZE" >> $GITHUB_OUTPUT
+
+      - name: Decode (strip whitespace)
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          # Show first/last 20 chars of raw file (debug)
+          echo "First 20 chars:"
+          head -c 20 video.txt
+          echo ""
+          echo "Last 20 chars:"
+          tail -c 20 video.txt
+          echo ""
+
+          # Remove ALL whitespace and decode
+          CLEAN=$(tr -d ' \t\n\r' < video.txt)
+          echo "Cleaned length: $(echo -n "$CLEAN" | wc -c) bytes"
+          echo -n "$CLEAN" | base64 -d > restored_video.mp4
+          ACTUAL_SIZE=$(wc -c < restored_video.mp4)
+          echo "Decoded video size: $ACTUAL_SIZE bytes"
+          echo "actual_size=$ACTUAL_SIZE" >> $GITHUB_OUTPUT
+
+      - name: Validate size (warn if too small)
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          TEXT_SIZE=${{ steps.check.outputs.text_size }}
+          ACTUAL_SIZE=${{ steps.decode.outputs.actual_size }}
+          EXPECTED_MIN=$(echo "$TEXT_SIZE * 0.73" | bc | cut -d. -f1)
+          if [ "$ACTUAL_SIZE" -lt "$EXPECTED_MIN" ]; then
+            echo "❌ Decoded video size ($ACTUAL_SIZE) is less than 73% of text size ($TEXT_SIZE) – likely truncated input"
+            exit 1
+          fi
+          echo "✅ Size check passed"
+
+      - name: Commit and push
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git add -f restored_video.mp4
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto‑decode video [skip-ci]"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
